@@ -1,8 +1,8 @@
-# Spyder.
+# Spyder
 
-A small Windows desktop app that wraps [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-and ffmpeg, so you can download a video by pasting a link — no terminal, no
-flags, no install steps.
+video downloader tool that supports 
+
+video downloader tool that supports YouTube.
 
 Paste a link → it works out where the link is from and reads it → pick a
 quality → pick a folder → Download.
