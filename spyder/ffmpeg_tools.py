@@ -1,6 +1,6 @@
 """Locating the ffmpeg binary.
 
-GrabIt ships ffmpeg.exe inside the frozen executable, but it also works from a
+Spyder ships ffmpeg.exe inside the frozen executable, but it also works from a
 source checkout or against a system install, so the lookup tries several places
 before giving up.
 """
@@ -52,9 +52,9 @@ def find_ffmpeg() -> str | None:
 
 def missing_ffmpeg_message() -> str:
     return (
-        "ffmpeg was not found, so GrabIt cannot merge video and audio or "
+        "ffmpeg was not found, so Spyder cannot merge video and audio or "
         "convert to MP3.\n\n"
-        "This build was expected to include ffmpeg. If you unzipped GrabIt, "
-        "make sure ffmpeg.exe sits in the same folder as GrabIt.exe, or "
+        "This build was expected to include ffmpeg. If you unzipped Spyder, "
+        "make sure ffmpeg.exe sits in the same folder as Spyder.exe, or "
         f"install ffmpeg from {FFMPEG_DOWNLOAD_PAGE} and add it to your PATH."
     )

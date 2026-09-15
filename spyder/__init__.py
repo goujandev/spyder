@@ -1,4 +1,4 @@
-"""GrabIt - a minimal desktop front-end for yt-dlp.
+"""Spyder - a minimal desktop front-end for yt-dlp.
 
 Copyright (C) 2026 GoujanFPS
 
@@ -15,6 +15,6 @@ You should have received a copy of the GNU General Public License along with
 this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "1.1.0"
-APP_NAME = "GrabIt"
-ORG_NAME = "GrabIt"
+__version__ = "1.2.0"
+APP_NAME = "Spyder"
+ORG_NAME = "Spyder"

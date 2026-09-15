@@ -1,4 +1,4 @@
-"""GrabIt entry point."""
+"""Spyder entry point."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _set_windows_app_id() -> None:
     try:
         import ctypes
 
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GrabIt.App")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Spyder.App")
     except Exception:  # noqa: BLE001 - cosmetic only, never worth failing over
         pass
 

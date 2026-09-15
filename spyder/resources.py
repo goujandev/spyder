@@ -5,8 +5,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-APP_ICON = "GrabIt.ico"
-WINDOW_ICON = "icon.png"
+APP_ICON = "Spyder.ico"
+WINDOW_ICON = APP_ICON
+# The authored source logo, sitting in the project root. Looked at when the
+# build has not run yet, so a fresh checkout still has a mark to show.
+WINDOW_LOGO = "logo.png"
 
 
 def _search_dirs() -> list[Path]:

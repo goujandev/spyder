@@ -1,8 +1,12 @@
-"""The GrabIt main window.
+"""The Spyder main window.
 
-Laid out like a browser: a tab strip, a toolbar holding the URL field, and the
-page beneath them. The window owns the widgets and the two workers; all blocking
-work lives in worker.py, so every method here returns immediately.
+The window draws its own frame. A title strip flush to the top carries the app
+mark, what is being downloaded, and the three window controls; everything else
+sits in one rounded canvas inset from the edges, on the dot texture. Nothing on
+screen is drawn by the OS.
+
+The window owns the widgets and the two workers; all blocking work lives in
+worker.py, so every method here returns immediately.
 """
 
 from __future__ import annotations
@@ -11,8 +15,8 @@ import html
 import os
 import subprocess
 
-from PyQt6.QtCore import QSettings, QStandardPaths, Qt, QUrl
-from PyQt6.QtGui import QDesktopServices, QFontMetrics, QIcon
+from PyQt6.QtCore import QSettings, QSize, QStandardPaths, Qt, QTimer, QUrl
+from PyQt6.QtGui import QDesktopServices, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -28,55 +32,80 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, ORG_NAME, __version__, theme
+from . import APP_NAME, ORG_NAME, downloader, platforms, theme, win32
 from .ffmpeg_tools import find_ffmpeg
-from .resources import WINDOW_ICON, resource_path
+from .resources import WINDOW_ICON, WINDOW_LOGO, resource_path
 from .widgets import (
     BlockDialog,
     BlockSelect,
+    DotCanvas,
+    EdgeResizer,
     ElidedLabel,
+    IconButton,
+    IconLabel,
     Omnibox,
+    TitleBar,
+    WindowControls,
     action_button,
-    icon_button,
-    icon_label,
-    rule,
     section_label,
 )
 from .worker import DownloadWorker, ProbeWorker, human_size
 
-STRIP_HEIGHT = 34
-TAB_MAX_WIDTH = 360
-TAB_PADDING = 28  # the 14px each side the style sheet gives the tab
-NEW_TAB = "New download"
-RESULT_HEIGHT = 38
+IDLE_TITLE = "New download"
+MARK_SIZE = 18
+RESULT_HEIGHT = 40
 TASKBAR_FLASH_MS = 3000
+
+# How long a finished-looking link sits still before Spyder reads it by itself.
+# Long enough that a link typed by hand settles first, short enough that a
+# paste feels understood rather than processed.
+AUTO_FETCH_MS = 500
 
 # Log tags are a fixed-width first column; the colour carries the severity.
 LOG_TAG_WIDTH = 7
-LOG_TONES = {"warn": theme.WARNING, "error": theme.DANGER}
+LOG_TONES = {"warn": theme.BLOCKED, "error": theme.DANGER, "ok": theme.READY}
 
 
 def app_icon() -> QIcon:
-    """The GrabIt icon, or an empty icon if the asset is missing."""
-    path = resource_path(WINDOW_ICON)
-    return QIcon(path) if path else QIcon()
+    """The Spyder mark, from the built icon or the source logo beside it."""
+    for name in (WINDOW_ICON, WINDOW_LOGO):
+        path = resource_path(name)
+        if path:
+            return QIcon(path)
+    return QIcon()
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} {__version__}")
+        self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
-        self.setMinimumSize(640, 560)
+        self.setMinimumSize(660, 620)
+        self.resize(760, 680)
+
+        # An OS frame above a carefully made app looks like a web page in a
+        # picture frame. Dropping it means owing the user drag, double-click to
+        # maximise and edge resize; TitleBar and EdgeResizer give those back.
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
 
         self._settings = QSettings(ORG_NAME, APP_NAME)
         self._probe_worker: ProbeWorker | None = None
         self._download_worker: DownloadWorker | None = None
         self._presets: list = []
         self._probed_url = ""
-        self._titlebar_done = False
+        self._corners_done = False
+        self._auto_probe = False
+        self._impersonation_warned = False
+
+        # Pasting a link is the whole gesture; making the user press Fetch
+        # afterwards asks again for a decision they have already made.
+        self._auto_fetch = QTimer(self)
+        self._auto_fetch.setSingleShot(True)
+        self._auto_fetch.setInterval(AUTO_FETCH_MS)
+        self._auto_fetch.timeout.connect(self.on_auto_fetch)
 
         self._build_ui()
+        EdgeResizer(self)
         self._restore_output_dir()
         self._check_ffmpeg()
         self._update_buttons()
@@ -84,41 +113,78 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- layout
 
     def _build_ui(self) -> None:
-        central = QWidget()
-        stack = QVBoxLayout(central)
+        shell = QWidget()
+        shell.setObjectName("shell")
+        stack = QVBoxLayout(shell)
         stack.setContentsMargins(0, 0, 0, 0)
         stack.setSpacing(0)
-        stack.addWidget(self._build_strip())
-        stack.addWidget(self._build_toolbar())
-        stack.addWidget(self._build_page(), 1)
-        self.setCentralWidget(central)
+        stack.addWidget(self._build_head())
 
-    def _build_strip(self) -> QWidget:
-        """The deepest strip. One tab, because there is one download at a time."""
-        strip = QWidget()
-        strip.setObjectName("strip")
-        strip.setFixedHeight(STRIP_HEIGHT)
+        # The strip stays flush because the close button has to reach the
+        # corner. The canvas does not, because nothing in it does.
+        body = QWidget()
+        body.setObjectName("shell")
+        inset = QVBoxLayout(body)
+        inset.setContentsMargins(
+            theme.CANVAS_INSET, 0, theme.CANVAS_INSET, theme.CANVAS_INSET
+        )
+        inset.addWidget(self._build_canvas())
+        stack.addWidget(body, 1)
 
-        row = QHBoxLayout(strip)
-        row.setContentsMargins(8, 0, 0, 0)
-        row.setSpacing(0)
+        self.setCentralWidget(shell)
 
-        self.tab_label = QLabel(NEW_TAB)
-        self.tab_label.setObjectName("tab")
-        self.tab_label.setMaximumWidth(TAB_MAX_WIDTH)
-        row.addWidget(self.tab_label)
-        row.addStretch(1)
+    def _build_head(self) -> QWidget:
+        """The title strip: what this is, what it is doing, and the controls."""
+        head = TitleBar()
+        head.doubleClicked.connect(self._toggle_maximised)
 
-        version = QLabel(f"{APP_NAME.lower()} {__version__}")
-        version.setObjectName("version")
-        row.addWidget(version)
-        return strip
+        row = QHBoxLayout(head)
+        row.setContentsMargins(13, 0, 0, 0)
+        row.setSpacing(9)
+
+        mark = QLabel()
+        mark.setObjectName("headMark")
+        path = resource_path(WINDOW_LOGO) or resource_path(WINDOW_ICON)
+        if path:
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                mark.setPixmap(
+                    pixmap.scaled(
+                        QSize(MARK_SIZE, MARK_SIZE),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+        row.addWidget(mark)
+
+        name = QLabel(APP_NAME)
+        name.setObjectName("headTitle")
+        name.setFont(theme.title_font())
+        row.addWidget(name)
+
+        # What is being downloaded, in the one place always on screen.
+        self.head_sub = ElidedLabel("headSub")
+        row.addWidget(self.head_sub, 1)
+
+        row.addWidget(WindowControls(self))
+        self._head = head
+        return head
+
+    def _build_canvas(self) -> QWidget:
+        canvas = DotCanvas()
+        column = QVBoxLayout(canvas)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self._build_toolbar())
+        column.addWidget(self._build_page(), 1)
+        self._canvas = canvas
+        return canvas
 
     def _build_toolbar(self) -> QWidget:
         toolbar = QWidget()
         toolbar.setObjectName("toolbar")
         column = QVBoxLayout(toolbar)
-        column.setContentsMargins(12, 8, 12, 8)
+        column.setContentsMargins(16, 16, 16, 0)
         column.setSpacing(8)
 
         row = QHBoxLayout()
@@ -128,7 +194,8 @@ class MainWindow(QMainWindow):
         self.url_edit.returnPressed.connect(self.on_fetch)
         self.url_edit.textChanged.connect(self.on_url_changed)
         self.fetch_button = action_button("Fetch")
-        self.fetch_button.setMinimumWidth(92)
+        self.fetch_button.setMinimumWidth(96)
+        self.fetch_button.setFixedHeight(theme.ROW_HEIGHT + 8)
         self.fetch_button.clicked.connect(self.on_fetch)
         row.addWidget(self.omnibox, 1)
         row.addWidget(self.fetch_button)
@@ -148,38 +215,33 @@ class MainWindow(QMainWindow):
         page = QWidget()
         page.setObjectName("page")
         column = QVBoxLayout(page)
-        column.setContentsMargins(12, 12, 12, 12)
+        column.setContentsMargins(16, 16, 16, 16)
         column.setSpacing(0)
 
         column.addWidget(section_label("Quality"))
-        column.addSpacing(6)
+        column.addSpacing(7)
         self.quality_select = BlockSelect("Fetch a link first")
         column.addWidget(self.quality_select)
 
-        column.addSpacing(14)
+        column.addSpacing(16)
         column.addWidget(section_label("Save to"))
-        column.addSpacing(6)
+        column.addSpacing(7)
         folder_row = QHBoxLayout()
         folder_row.setSpacing(8)
         self.folder_edit = QLineEdit()
         self.folder_edit.setObjectName("field")
         self.folder_edit.setReadOnly(True)
         self.folder_edit.setFixedHeight(theme.ROW_HEIGHT)
-        self.browse_button = icon_button(theme.ICON_FOLDER, "Browse", "Choose a folder")
+        self.browse_button = IconButton("folder", "Choose a folder")
         self.browse_button.clicked.connect(self.on_browse)
-        self.open_folder_button = icon_button(
-            theme.ICON_OPEN, "Open", "Open the folder"
-        )
+        self.open_folder_button = IconButton("external", "Open the folder")
         self.open_folder_button.clicked.connect(self.on_open_folder)
         folder_row.addWidget(self.folder_edit, 1)
         folder_row.addWidget(self.browse_button)
         folder_row.addWidget(self.open_folder_button)
         column.addLayout(folder_row)
 
-        column.addSpacing(14)
-        column.addWidget(rule())
-        column.addSpacing(14)
-
+        column.addSpacing(18)
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
         self.download_button = action_button("Download", "primary")
@@ -191,28 +253,30 @@ class MainWindow(QMainWindow):
         action_row.addStretch(1)
         column.addLayout(action_row)
 
-        column.addSpacing(12)
+        column.addSpacing(16)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(6)
         # The numbers live in the status line below, in monospace.
         self.progress_bar.setTextVisible(False)
         column.addWidget(self.progress_bar)
         column.addWidget(self._build_result())
 
-        column.addSpacing(8)
+        column.addSpacing(10)
         self.status_label = QLabel("ready")
         self.status_label.setObjectName("status")
         self.status_label.setWordWrap(True)
         column.addWidget(self.status_label)
 
-        column.addSpacing(14)
+        column.addSpacing(16)
         column.addWidget(section_label("Log"))
-        column.addSpacing(6)
+        column.addSpacing(7)
         self.log_view = QPlainTextEdit()
         self.log_view.setObjectName("log")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
+        self.log_view.setFrameShape(QFrame.Shape.NoFrame)
         column.addWidget(self.log_view, 1)
 
         self._page = page
@@ -226,9 +290,9 @@ class MainWindow(QMainWindow):
         result.setVisible(False)
 
         row = QHBoxLayout(result)
-        row.setContentsMargins(0, 0, 8, 0)
+        row.setContentsMargins(0, 0, 6, 0)
         row.setSpacing(0)
-        row.addWidget(icon_label(theme.ICON_DONE, "resultIcon"))
+        row.addWidget(IconLabel("check", "resultIcon", colour=theme.READY))
 
         self.result_name = ElidedLabel("resultName")
         row.addWidget(self.result_name, 1)
@@ -240,6 +304,7 @@ class MainWindow(QMainWindow):
         self.reveal_button = QPushButton("Show in folder")
         self.reveal_button.setObjectName("reveal")
         self.reveal_button.setFixedHeight(26)
+        self.reveal_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.reveal_button.clicked.connect(self.on_reveal)
         row.addWidget(self.reveal_button)
 
@@ -265,11 +330,31 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
 
+    def _toggle_maximised(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
     def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
-        if not self._titlebar_done:
-            self._titlebar_done = True
-            theme.dark_titlebar(self)
+        if not self._corners_done:
+            self._corners_done = True
+            win32.round_corners(self)
+
+    def nativeEvent(self, event_type, message):  # noqa: N802 - Qt naming
+        """Answer the one Windows message a frameless window has to answer.
+
+        Maximising or snapping would otherwise run the window under the
+        taskbar; win32.clamp_maximised decides how big "maximised" is.
+
+        Everything else is declined with (False, 0), which is what the base
+        class does. It is spelled out rather than delegated because calling
+        QWidget.nativeEvent through super() crashes PyQt6 outright.
+        """
+        if event_type == b"windows_generic_MSG" and win32.clamp_maximised(message):
+            return True, 0
+        return False, 0
 
     # ------------------------------------------------------------- utilities
 
@@ -282,18 +367,15 @@ class MainWindow(QMainWindow):
         padded = padded.replace(" ", "&#160;")
         self.log_view.appendHtml(
             f'<span style="color:{colour};">{padded}</span>'
-            f'<span style="color:{theme.TEXT_2};">{html.escape(message)}</span>'
+            f'<span style="color:{theme.TEXT};">{html.escape(message)}</span>'
         )
 
     def set_status(self, message: str) -> None:
         self.status_label.setText(message)
 
-    def set_tab_title(self, title: str) -> None:
-        metrics = QFontMetrics(self.tab_label.font())
-        room = TAB_MAX_WIDTH - TAB_PADDING
-        elided = metrics.elidedText(title, Qt.TextElideMode.ElideRight, room)
-        self.tab_label.setText(elided)
-        self.tab_label.setToolTip(title if elided != title else "")
+    def set_head_title(self, title: str) -> None:
+        """What is being downloaded, beside the app name in the title strip."""
+        self.head_sub.set_full_text("" if title == IDLE_TITLE else f"\u00b7  {title}")
 
     def _dialog(
         self,
@@ -304,8 +386,8 @@ class MainWindow(QMainWindow):
         escape_index: int = 0,
     ) -> int:
         """A modal panel over the page. Blocks until a button is pressed."""
-        dialog = BlockDialog(self._page, tone, heading, message, buttons, escape_index)
-        result = dialog.exec(freeze=(self._toolbar,))
+        dialog = BlockDialog(self._canvas, tone, heading, message, buttons, escape_index)
+        result = dialog.exec()
         # Worker signals can land while the dialog holds a nested event loop,
         # so re-derive every enabled state once it closes.
         self._update_buttons()
@@ -356,16 +438,42 @@ class MainWindow(QMainWindow):
             return
         self.log("ffmpeg not found - merging and mp3 conversion will fail", "warn")
 
+    def _check_impersonation(self, platform) -> None:
+        """Warn once when a link needs something this build cannot do.
+
+        Said before the fetch rather than after it fails, so the reason
+        arrives ahead of the error it would otherwise have to explain. The
+        first answer costs ~100ms, which is why it is asked here and not on
+        every keystroke.
+        """
+        if self._impersonation_warned or not platform.needs_impersonation:
+            return
+        if downloader.impersonation_available():
+            return
+        self._impersonation_warned = True
+        self.log(downloader.IMPERSONATION_HINT, "warn")
+
     # -------------------------------------------------------------- handlers
 
     def on_url_changed(self) -> None:
+        url = self.url_edit.text().strip()
+        stale = url != self._probed_url
         # Any edit invalidates the fetched quality list.
-        if self.url_edit.text().strip() != self._probed_url:
+        if stale:
             self._presets = []
             self.quality_select.clear()
             self.detail_label.setVisible(False)
-            self.set_tab_title(NEW_TAB)
+            self.set_head_title(IDLE_TITLE)
             self._clear_result()
+
+        # Free and offline, so the platform is named on every keystroke:
+        # the link is recognised as it lands, not after a round trip.
+        self.omnibox.set_platform(platforms.detect(url).name)
+
+        self._auto_fetch.stop()
+        if stale and platforms.looks_complete(url):
+            self._auto_fetch.start()
+
         self._update_buttons()
 
     def on_browse(self) -> None:
@@ -382,15 +490,26 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def on_fetch(self) -> None:
+        self._start_probe(auto=False)
+
+    def on_auto_fetch(self) -> None:
+        """The debounce timer fired. Checked again, because it fires late."""
+        if self.url_edit.text().strip() != self._probed_url:
+            self._start_probe(auto=True)
+
+    def _start_probe(self, auto: bool) -> None:
         if self._busy():
             return
         url = self.url_edit.text().strip()
         if not url:
             return
 
+        self._auto_fetch.stop()
+        self._auto_probe = auto
         self.progress_bar.setValue(0)
         self.set_status("reading link")
         self.log(url, "read")
+        self._check_impersonation(platforms.detect(url))
 
         self._probe_worker = ProbeWorker(url, self)
         self._probe_worker.succeeded.connect(self.on_probe_ok)
@@ -405,8 +524,12 @@ class MainWindow(QMainWindow):
 
         self.quality_select.set_items([preset.label for preset in self._presets])
 
+        # The extractor that answered knows the site better than its
+        # hostname did, so the badge is settled here rather than left a guess.
+        self.omnibox.set_platform(info.platform.name)
+
         # The title names the tab, the way a page title does.
-        self.set_tab_title(info.title)
+        self.set_head_title(info.title)
         detail = info.duration
         if info.uploader:
             detail = f"{detail}  ·  {info.uploader}"
@@ -415,11 +538,17 @@ class MainWindow(QMainWindow):
 
         self.set_status("ready to download")
         self.log(f"{len(self._presets)} qualities", "ok")
+        if info.platform.drop_watermarked:
+            self.log("watermarked copies skipped", "ok")
 
     def on_probe_failed(self, message: str) -> None:
         self.set_status("link unreadable")
         self.log(message, "error")
-        self._notice("warning", "link", message)
+        # Nobody asked for the automatic read, so nobody should have to
+        # dismiss a box when it fails. A half-typed link is the usual cause;
+        # the log says what happened and Fetch is still there to press.
+        if not self._auto_probe:
+            self._notice("warning", "link", message)
 
     def on_probe_finished(self) -> None:
         self._probe_worker = None
@@ -533,6 +662,7 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- closing
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._auto_fetch.stop()
         if self._download_worker is not None:
             answer = self._dialog(
                 "ask",

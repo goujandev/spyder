@@ -12,7 +12,7 @@ import threading
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from . import downloader
-from .downloader import DownloadCancelled, GrabItError, Preset, VideoInfo
+from .downloader import DownloadCancelled, SpyderError, Preset, VideoInfo
 
 
 def human_size(num_bytes) -> str:
@@ -51,7 +51,7 @@ class ProbeWorker(QThread):
     def run(self) -> None:
         try:
             info: VideoInfo = downloader.probe(self._url)
-        except GrabItError as exc:
+        except SpyderError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - a crash here must not kill the app
             self.failed.emit(f"Unexpected problem while reading that link: {exc}")
@@ -143,7 +143,7 @@ class DownloadWorker(QThread):
         except DownloadCancelled:
             self._cleanup_partials()
             self.cancelled.emit()
-        except GrabItError as exc:
+        except SpyderError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(f"Unexpected problem during download: {exc}")

@@ -1,7 +1,7 @@
-GrabIt - Third-Party Notices
+Spyder - Third-Party Notices
 ============================
 
-GrabIt is distributed with the following third-party components. Each remains
+Spyder is distributed with the following third-party components. Each remains
 under its own license, reproduced or referenced below.
 
 
@@ -19,11 +19,11 @@ libx264). The full license text is available at:
 
 WRITTEN OFFER FOR SOURCE CODE
 You may obtain the complete corresponding source code for the FFmpeg binary
-distributed with GrabIt from:
+distributed with Spyder from:
     FFmpeg source:     https://git.ffmpeg.org/ffmpeg.git
     Build scripts:     https://github.com/GyanD/codexffmpeg
 
-FFmpeg is invoked by GrabIt as a separate executable process.
+FFmpeg is invoked by Spyder as a separate executable process.
 
 
 2. PyQt6
@@ -46,7 +46,31 @@ License: The Unlicense (public domain dedication)
          https://unlicense.org/
 
 
-4. Python
+4. curl_cffi
+------------
+Website: https://github.com/lexiforest/curl_cffi
+License: MIT License
+         https://github.com/lexiforest/curl_cffi/blob/main/LICENSE
+
+curl_cffi lets yt-dlp present itself as an ordinary browser, which several
+sites - TikTok among them - require before they will serve a page at all.
+
+The wheel ships a compiled library, libcurl-impersonate, which is bundled with
+Spyder as libcurl-impersonate-*.dll. It is built from:
+
+    curl-impersonate   MIT License
+                       https://github.com/lexiforest/curl-impersonate
+    libcurl            curl License (MIT/X derivative)
+                       https://curl.se/docs/copyright.html
+    BoringSSL          Apache License 2.0, with portions under the OpenSSL
+                       and ISC licenses
+                       https://boringssl.googlesource.com/boringssl/+/HEAD/LICENSE
+    nghttp2            MIT License
+                       https://github.com/nghttp2/nghttp2/blob/master/COPYING
+    zlib / brotli      zlib and MIT Licenses
+
+
+5. Python
 ---------
 Website: https://www.python.org
 License: Python Software Foundation License, version 2
@@ -54,4 +78,4 @@ License: Python Software Foundation License, version 2
 
 
 Trademarks and other rights in the above projects belong to their respective
-owners. GrabIt is not affiliated with, or endorsed by, any of them.
+owners. Spyder is not affiliated with, or endorsed by, any of them.

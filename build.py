@@ -2,7 +2,7 @@
 
     python build.py
 
-The result is dist/GrabIt.exe - a single self-contained file. The first run
+The result is dist/Spyder.exe - a single self-contained file. The first run
 downloads a static ffmpeg build (~30 MB zipped) into vendor/ so it can be
 bundled; later builds reuse it.
 
@@ -28,8 +28,9 @@ VENDOR = ROOT / "vendor"
 FFMPEG_EXE = VENDOR / "ffmpeg.exe"
 
 SOURCE_LOGO = ROOT / "logo.png"
+SOURCE_ICON = ROOT / "logo.ico"
 ASSETS = ROOT / "assets"
-ICON_ICO = ASSETS / "GrabIt.ico"
+ICON_ICO = ASSETS / "Spyder.ico"
 ICON_PNG = ASSETS / "icon.png"
 
 # Sizes Windows picks between for the taskbar, Explorer and Alt-Tab.
@@ -49,13 +50,28 @@ def build_icons() -> bool:
         print(f"No {SOURCE_LOGO.name} found - building without a custom icon.")
         return True
 
+    # Preserve the authored small pixel-art sizes; regenerate from PNG only
+    # when there is no explicit source ICO.
+    authored_icon = SOURCE_ICON.is_file()
+    source_mtime = max(
+        SOURCE_LOGO.stat().st_mtime,
+        SOURCE_ICON.stat().st_mtime if authored_icon else 0,
+        Path(__file__).stat().st_mtime,
+    )
     fresh = (
         ICON_ICO.is_file()
         and ICON_PNG.is_file()
-        and ICON_ICO.stat().st_mtime >= SOURCE_LOGO.stat().st_mtime
+        and min(ICON_ICO.stat().st_mtime, ICON_PNG.stat().st_mtime) >= source_mtime
     )
     if fresh:
         print(f"Icons already up to date: {ICON_ICO}")
+        return True
+
+    if authored_icon:
+        ASSETS.mkdir(exist_ok=True)
+        shutil.copyfile(SOURCE_ICON, ICON_ICO)
+        shutil.copyfile(SOURCE_LOGO, ICON_PNG)
+        print(f"Copied authored icons to {ASSETS}")
         return True
 
     try:
@@ -68,10 +84,8 @@ def build_icons() -> bool:
     ASSETS.mkdir(exist_ok=True)
     with Image.open(SOURCE_LOGO) as image:
         image = image.convert("RGBA")
-        # Pillow writes every requested size into the one .ico file, so Windows
-        # can pick a properly downscaled version instead of squashing a big one.
         image.save(ICON_ICO, format="ICO", sizes=[(s, s) for s in ICO_SIZES])
-        image.resize((256, 256), Image.LANCZOS).save(ICON_PNG, format="PNG")
+        image.resize((256, 256), Image.Resampling.LANCZOS).save(ICON_PNG, format="PNG")
 
     print(f"Generated {ICON_ICO} and {ICON_PNG} from {SOURCE_LOGO.name}")
     return True
@@ -87,7 +101,7 @@ def fetch_ffmpeg() -> bool:
     print("(about 30 MB - this happens once)")
 
     try:
-        request = Request(FFMPEG_ZIP_URL, headers={"User-Agent": "GrabIt-build"})
+        request = Request(FFMPEG_ZIP_URL, headers={"User-Agent": "Spyder-build"})
         with urlopen(request, timeout=120) as response:
             payload = response.read()
     except Exception as exc:  # noqa: BLE001
@@ -123,7 +137,7 @@ def run_pyinstaller() -> int:
         print("    pip install -r requirements-dev.txt")
         return 1
 
-    command = [sys.executable, "-m", "PyInstaller", "GrabIt.spec", "--noconfirm"]
+    command = [sys.executable, "-m", "PyInstaller", "Spyder.spec", "--noconfirm"]
     print("Running:", " ".join(command))
     return subprocess.call(command, cwd=str(ROOT))
 
@@ -147,7 +161,7 @@ def main() -> int:
 
     code = run_pyinstaller()
     if code == 0:
-        exe = ROOT / "dist" / "GrabIt.exe"
+        exe = ROOT / "dist" / "Spyder.exe"
         if exe.is_file():
             size_mb = exe.stat().st_size / (1024 * 1024)
             print(f"\nBuilt {exe} ({size_mb:.0f} MB)")
