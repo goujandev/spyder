@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent
 VENDOR = ROOT / "vendor"
 FFMPEG_EXE = VENDOR / "ffmpeg.exe"
 
+NOTICES = ROOT / "THIRD-PARTY-NOTICES.txt"
 SOURCE_LOGO = ROOT / "logo.png"
 SOURCE_ICON = ROOT / "logo.ico"
 ASSETS = ROOT / "assets"
@@ -165,6 +166,14 @@ def main() -> int:
         if exe.is_file():
             size_mb = exe.stat().st_size / (1024 * 1024)
             print(f"\nBuilt {exe} ({size_mb:.0f} MB)")
+        # The notices ship inside the exe as well, but a release attaches this
+        # copy: the GPL ffmpeg bundled in there has to travel with its licence,
+        # and a step you have to remember is a step that gets forgotten.
+        if NOTICES.is_file():
+            shutil.copyfile(NOTICES, ROOT / "dist" / NOTICES.name)
+            print(f"Copied {NOTICES.name} to dist/")
+        else:
+            print(f"WARNING: {NOTICES.name} is missing - do not publish without it.")
     return code
 
 
