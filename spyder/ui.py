@@ -14,6 +14,7 @@ from __future__ import annotations
 import html
 import os
 import subprocess
+from pathlib import Path
 
 from PyQt6.QtCore import QSettings, QSize, QStandardPaths, Qt, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QIcon, QPixmap
@@ -32,7 +33,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, ORG_NAME, downloader, platforms, theme, win32
+from . import APP_NAME, ORG_NAME, __version__, downloader, platforms, theme, updater, win32
 from .ffmpeg_tools import find_ffmpeg
 from .resources import WINDOW_ICON, WINDOW_LOGO, resource_path
 from .widgets import (
@@ -50,6 +51,7 @@ from .widgets import (
     section_label,
 )
 from .worker import DownloadWorker, ProbeWorker, human_size
+from .update_worker import UpdateWorker
 
 IDLE_TITLE = "New download"
 MARK_SIZE = 18
@@ -91,6 +93,9 @@ class MainWindow(QMainWindow):
         self._settings = QSettings(ORG_NAME, APP_NAME)
         self._probe_worker: ProbeWorker | None = None
         self._download_worker: DownloadWorker | None = None
+        self._update_worker: UpdateWorker | None = None
+        self._update_outcome: tuple | None = None
+        self._close_after_update = False
         self._presets: list = []
         self._probed_url = ""
         self._corners_done = False
@@ -279,6 +284,17 @@ class MainWindow(QMainWindow):
         self.log_view.setFrameShape(QFrame.Shape.NoFrame)
         column.addWidget(self.log_view, 1)
 
+        column.addSpacing(10)
+        update_row = QHBoxLayout()
+        version_label = QLabel(f"Spyder {__version__}")
+        version_label.setObjectName("detailText")
+        update_row.addWidget(version_label)
+        update_row.addStretch(1)
+        self.update_button = action_button("Check for updates")
+        self.update_button.clicked.connect(self.on_check_updates)
+        update_row.addWidget(self.update_button)
+        column.addLayout(update_row)
+
         self._page = page
         return page
 
@@ -397,7 +413,11 @@ class MainWindow(QMainWindow):
         self._dialog(tone, heading, message, [("Dismiss", "")])
 
     def _busy(self) -> bool:
-        return self._download_worker is not None or self._probe_worker is not None
+        return (
+            self._download_worker is not None
+            or self._probe_worker is not None
+            or self._update_worker is not None
+        )
 
     def _update_buttons(self) -> None:
         downloading = self._download_worker is not None
@@ -411,7 +431,13 @@ class MainWindow(QMainWindow):
         self.download_button.setEnabled(
             not busy and bool(self._presets) and bool(self.folder_edit.text())
         )
-        self.cancel_button.setEnabled(downloading)
+        updating = self._update_worker is not None
+        self.cancel_button.setEnabled(downloading or updating)
+        self.update_button.setEnabled(not busy)
+        self.update_button.setText(
+            ("Checking..." if self._update_worker.release is None else "Downloading update...")
+            if updating else "Check for updates"
+        )
         self.open_folder_button.setEnabled(bool(self.folder_edit.text()))
         self.fetch_button.setText("Fetching" if probing else "Fetch")
 
@@ -452,6 +478,112 @@ class MainWindow(QMainWindow):
             return
         self._impersonation_warned = True
         self.log(downloader.IMPERSONATION_HINT, "warn")
+
+    # --------------------------------------------------------------- updates
+
+    def on_check_updates(self) -> None:
+        if self._busy():
+            return
+        self._auto_fetch.stop()
+        self.log("checking GitHub releases", "update")
+        self.set_status("checking for updates")
+        self._start_update_worker()
+
+    def _start_update_worker(self, release: updater.Release | None = None) -> None:
+        cache = Path(QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.CacheLocation
+        )) / "updates"
+        worker = UpdateWorker(cache, release, self)
+        self._update_outcome = None
+        worker.checked.connect(lambda result: self._record_update("checked", result))
+        worker.downloaded.connect(lambda result: self._record_update("downloaded", result))
+        worker.failed.connect(lambda message: self._record_update("failed", message))
+        worker.cancelled.connect(lambda: self._record_update("cancelled", None))
+        worker.progress.connect(self.on_update_progress)
+        worker.finished.connect(self.on_update_finished)
+        self._update_worker = worker
+        worker.start()
+        self._update_buttons()
+
+    def _record_update(self, kind: str, result) -> None:
+        # Present results only after finished: no worker is destroyed or left
+        # running while setup replaces files or a modal panel starts a new job.
+        self._update_outcome = (kind, result)
+
+    def on_update_progress(self, done: int, total: int) -> None:
+        percent = int(done * 100 / total)
+        self.progress_bar.setValue(percent)
+        self.set_status(f"update {percent}%  {human_size(done)} / {human_size(total)}")
+
+    def on_update_finished(self) -> None:
+        worker = self._update_worker
+        self._update_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        outcome = self._update_outcome
+        self._update_outcome = None
+        self._update_buttons()
+        if self._close_after_update:
+            self.close()
+            return
+        if outcome is None:
+            return
+        kind, result = outcome
+        if kind == "cancelled":
+            self.progress_bar.setValue(0)
+            self.set_status("update cancelled")
+            self.log("update cancelled", "cancel")
+        elif kind == "failed":
+            self.progress_bar.setValue(0)
+            self.set_status("update failed")
+            self.log(result, "error")
+            self._notice("warning", "update", result)
+        elif kind == "checked":
+            self._present_update(result)
+        elif kind == "downloaded":
+            self._install_update(result)
+
+    def _present_update(self, release: updater.Release | None) -> None:
+        if release is None:
+            self.set_status("up to date")
+            self.log(f"Spyder {__version__} is up to date", "ok")
+            self._notice("info", "up to date", f"You are using Spyder {__version__}, the latest stable version.")
+            return
+        self.set_status(f"Spyder {release.version} available")
+        self.log(f"Spyder {release.version} available", "update")
+        if updater.installation_directory() is None:
+            answer = self._dialog(
+                "ask", "update available",
+                f"Spyder {release.version} is available. In-app installation requires an "
+                "installed Windows copy of Spyder. Download and run the setup file from GitHub.",
+                [("Later", ""), ("Open release", "primary")],
+            )
+            if answer == 1:
+                QDesktopServices.openUrl(QUrl(updater.RELEASES_URL))
+            return
+        answer = self._dialog(
+            "ask", "update available",
+            f"Update Spyder {__version__} to {release.version}? The download is "
+            f"{human_size(release.size)}. Spyder will close after the download, "
+            "install the update, and restart. Your settings and downloads will be kept.",
+            [("Later", ""), ("Update and restart", "primary")],
+        )
+        if answer != 1:
+            return
+        self._clear_result()
+        self.set_status("downloading update")
+        self._start_update_worker(release)
+
+    def _install_update(self, update: updater.PreparedUpdate) -> None:
+        try:
+            updater.launch_installer(update)
+        except updater.UpdateError as exc:
+            self.set_status("installer could not start")
+            self.log(str(exc), "error")
+            self._notice("danger", "update", str(exc))
+            return
+        self.log("installer started; restarting Spyder", "update")
+        self.close()
 
     # -------------------------------------------------------------- handlers
 
@@ -653,6 +785,11 @@ class MainWindow(QMainWindow):
         self._update_buttons()
 
     def on_cancel(self) -> None:
+        if self._update_worker is not None:
+            self._update_worker.requestInterruption()
+            self.set_status("cancelling update")
+            self.cancel_button.setEnabled(False)
+            return
         if self._download_worker is None:
             return
         self.set_status("cancelling")
@@ -663,6 +800,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._auto_fetch.stop()
+        if self._update_worker is not None:
+            # A network read may take up to its timeout. Keep the event loop
+            # alive until the thread finishes instead of destroying a live QThread.
+            self._close_after_update = True
+            self._update_worker.requestInterruption()
+            self.set_status("cancelling update before closing")
+            event.ignore()
+            return
         if self._download_worker is not None:
             answer = self._dialog(
                 "ask",

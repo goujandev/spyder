@@ -1,0 +1,71 @@
+name: Windows installer release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+      - name: Install Python build dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Validate release version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          python -c "import os; from spyder import __version__; tag = os.environ['GITHUB_REF_NAME']; assert tag == 'v' + __version__, f'Tag {tag} does not match app version {__version__}'"
+      - name: Test updater and UI
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -v
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (!(Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Build installer and checksum
+        run: python build.py
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Spyder-Windows-installer
+          if-no-files-found: error
+          path: |
+            dist/Spyder-Setup-*.exe
+            dist/Spyder-Setup-*.exe.sha256
+            dist/THIRD-PARTY-NOTICES.txt
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Spyder-Windows-installer
+          path: release
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --generate-notes --title "Spyder $GITHUB_REF_NAME"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import subprocess
 import sys
@@ -45,25 +46,49 @@ def _set_windows_app_id() -> None:
         pass
 
 
+
+def _hold_installer_mutex() -> None:
+    """Keep setup/uninstall from replacing files while any frozen instance runs."""
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateMutexW(None, False, "Local\\Spyder.App")
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    atexit.register(kernel.CloseHandle, handle)
+
+
 def main() -> int:
     _silence_child_console_windows()
     _set_windows_app_id()
+    _hold_installer_mutex()
 
     # Imported after the patch above so yt-dlp picks up the patched Popen.
+    from PyQt6.QtCore import QTimer
     from PyQt6.QtWidgets import QApplication
 
-    from . import APP_NAME, ORG_NAME, theme
+    from . import APP_NAME, ORG_NAME, __version__, theme
     from .ui import MainWindow, app_icon
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
+    app.setApplicationVersion(__version__)
     app.setWindowIcon(app_icon())
     # Fonts, palette and style sheet, before any widget is built.
     theme.apply(app)
 
     window = MainWindow()
     window.show()
+    if "--check-for-updates" in sys.argv or "--update" in sys.argv:
+        QTimer.singleShot(0, window.on_check_updates)
     return app.exec()
 
 

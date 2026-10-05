@@ -1,20 +1,11 @@
-"""One-command build: fetch ffmpeg if needed, then run PyInstaller.
-
-    python build.py
-
-The result is dist/Spyder.exe - a single self-contained file. The first run
-downloads a static ffmpeg build (~30 MB zipped) into vendor/ so it can be
-bundled; later builds reuse it.
-
-Flags:
-    --no-ffmpeg   skip the ffmpeg download and build without it (smaller exe,
-                  but the user must supply ffmpeg themselves)
-    --clean       remove build/ and dist/ first
-"""
+"""Build the installed Windows app, setup executable, and SHA-256 checksum."""
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import io
+import struct
 import os
 import shutil
 import subprocess
@@ -22,6 +13,9 @@ import sys
 import zipfile
 from pathlib import Path
 from urllib.request import Request, urlopen
+
+from spyder import __version__
+from spyder.updater import version_tuple
 
 ROOT = Path(__file__).resolve().parent
 VENDOR = ROOT / "vendor"
@@ -130,7 +124,7 @@ def fetch_ffmpeg() -> bool:
     return True
 
 
-def run_pyinstaller() -> int:
+def run_pyinstaller(no_ffmpeg: bool = False) -> int:
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
@@ -140,41 +134,92 @@ def run_pyinstaller() -> int:
 
     command = [sys.executable, "-m", "PyInstaller", "Spyder.spec", "--noconfirm"]
     print("Running:", " ".join(command))
-    return subprocess.call(command, cwd=str(ROOT))
+    env = os.environ.copy()
+    if no_ffmpeg:
+        env["SPYDER_NO_FFMPEG"] = "1"
+    else:
+        env.pop("SPYDER_NO_FFMPEG", None)
+    return subprocess.call(command, cwd=str(ROOT), env=env)
+
+
+
+def find_iscc(explicit: str | None = None) -> Path | None:
+    candidates = [
+        explicit, os.environ.get("ISCC"), shutil.which("ISCC"),
+        str(ROOT / ".tools" / "innosetup" / "ISCC.exe"),
+        str(Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Inno Setup 6" / "ISCC.exe"),
+        str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Inno Setup 6" / "ISCC.exe"),
+    ]
+    if explicit:
+        return Path(explicit).resolve() if Path(explicit).is_file() else None
+    return next((Path(item).resolve() for item in candidates if item and Path(item).is_file()), None)
+
+
+def build_installer(iscc: Path) -> int:
+    command = [str(iscc), f"/DAppVersion={__version__}", str(ROOT / "installer" / "Spyder.iss")]
+    print("Running:", " ".join(command), flush=True)
+    code = subprocess.call(command, cwd=str(ROOT))
+    if code:
+        return code
+    installer = ROOT / "dist" / f"Spyder-Setup-{__version__}.exe"
+    if not installer.is_file():
+        print(f"Installer compiler did not produce {installer}")
+        return 1
+    with installer.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    checksum = installer.with_suffix(".exe.sha256")
+    checksum.write_text(f"{digest}  {installer.name}\n", encoding="ascii")
+    print(f"Built {installer} ({installer.stat().st_size / (1024 * 1024):.0f} MB)")
+    print(f"Wrote {checksum}")
+    return 0
 
 
 def main() -> int:
-    args = set(sys.argv[1:])
+    parser = argparse.ArgumentParser(description="Build the Spyder Windows installer.")
+    parser.add_argument("--clean", action="store_true", help="remove build/ and dist/ before building")
+    parser.add_argument("--no-ffmpeg", action="store_true", help="exclude ffmpeg (requires a separate installation)")
+    parser.add_argument("--app-only", action="store_true", help="build dist/Spyder/ without creating an installer")
+    parser.add_argument("--iscc", metavar="PATH", help="path to the Inno Setup 6 compiler (6.3 or newer)")
+    args = parser.parse_args()
+    if os.name != "nt" or struct.calcsize("P") != 8:
+        print("The Windows installer must be built using 64-bit Python on Windows.")
+        return 1
+    version_tuple(__version__)
+    iscc = None if args.app_only else find_iscc(args.iscc)
+    if not args.app_only and iscc is None:
+        print("Inno Setup 6.3+ is required to build the installer.")
+        print("Install it from https://jrsoftware.org/isdl.php, or pass --iscc PATH.")
+        print("Use --app-only to build just the application folder.")
+        return 1
+    if not NOTICES.is_file() or not (ROOT / "LICENSE").is_file():
+        print("LICENSE and THIRD-PARTY-NOTICES.txt are required.")
+        return 1
 
-    if "--clean" in args:
+    if args.clean:
         for folder in ("build", "dist"):
-            path = ROOT / folder
+            path = (ROOT / folder).resolve()
+            if path.parent != ROOT:
+                raise RuntimeError(f"Refusing to clean outside the project: {path}")
             if path.exists():
                 print(f"Removing {path}")
-                shutil.rmtree(path, ignore_errors=True)
+                shutil.rmtree(path)
 
     if not build_icons():
         return 1
-
-    if "--no-ffmpeg" not in args:
-        if not fetch_ffmpeg():
-            return 1
-
-    code = run_pyinstaller()
-    if code == 0:
-        exe = ROOT / "dist" / "Spyder.exe"
-        if exe.is_file():
-            size_mb = exe.stat().st_size / (1024 * 1024)
-            print(f"\nBuilt {exe} ({size_mb:.0f} MB)")
-        # The notices ship inside the exe as well, but a release attaches this
-        # copy: the GPL ffmpeg bundled in there has to travel with its licence,
-        # and a step you have to remember is a step that gets forgotten.
-        if NOTICES.is_file():
-            shutil.copyfile(NOTICES, ROOT / "dist" / NOTICES.name)
-            print(f"Copied {NOTICES.name} to dist/")
-        else:
-            print(f"WARNING: {NOTICES.name} is missing - do not publish without it.")
-    return code
+    if not args.no_ffmpeg and not fetch_ffmpeg():
+        return 1
+    code = run_pyinstaller(args.no_ffmpeg)
+    if code:
+        return code
+    app_dir = ROOT / "dist" / "Spyder"
+    if not (app_dir / "Spyder.exe").is_file():
+        print("PyInstaller did not produce dist/Spyder/Spyder.exe.")
+        return 1
+    shutil.copyfile(NOTICES, ROOT / "dist" / NOTICES.name)
+    for notice in (NOTICES, ROOT / "LICENSE"):
+        shutil.copyfile(notice, app_dir / notice.name)
+    print(f"Built application: {app_dir}")
+    return 0 if args.app_only else build_installer(iscc)
 
 
 if __name__ == "__main__":

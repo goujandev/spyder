@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for Spyder.
 
-Produces a single windowed Spyder.exe in dist/, with ffmpeg.exe bundled inside
+Produces dist/Spyder/Spyder.exe and its runtime folder, with ffmpeg.exe bundled
 when vendor/ffmpeg.exe exists (build.py fetches it for you).
 
     pyinstaller Spyder.spec --noconfirm
@@ -78,7 +78,7 @@ else:
         print(f"Note: no separate curl_cffi DLLs found beside {libs_dir}")
 
 ffmpeg_exe = os.path.join(spec_dir, "vendor", "ffmpeg.exe")
-if os.path.isfile(ffmpeg_exe):
+if os.path.isfile(ffmpeg_exe) and os.environ.get("SPYDER_NO_FFMPEG") != "1":
     # Land it at the root of the extraction dir, where ffmpeg_tools looks first.
     binaries.append((ffmpeg_exe, "."))
 else:
@@ -117,9 +117,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="Spyder",
     debug=False,
     bootloader_ignore_signals=False,
@@ -134,4 +133,14 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=exe_icon,
+)
+
+# Onedir builds install directly without unpacking the entire app on each launch.
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="Spyder",
 )

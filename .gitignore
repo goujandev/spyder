@@ -7,3 +7,4 @@ venv/
 vendor/ffmpeg.exe
 vendor/*.zip
 assets/
+.tools/

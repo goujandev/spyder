@@ -59,14 +59,30 @@ exe. Without it TikTok fails before it starts; Spyder notices a TikTok link it
 cannot read and says so in the log rather than letting the fetch fail
 unexplained.
 
-## Using the built app
+## Installing and updating
 
-Grab `Spyder.exe` and double-click it. Python, Qt, yt-dlp and ffmpeg are all
-bundled inside, so there is nothing else to install.
+Download **Spyder-Setup-2.1.0.exe** (or the newer setup file) from
+[GitHub Releases](https://github.com/goujandev/spyder/releases), then run it.
+Setup installs to `%LOCALAPPDATA%\Programs\Spyder` for your Windows account,
+creates a Start Menu shortcut, and optionally creates a desktop shortcut.
+Python, Qt, yt-dlp, curl_cffi and ffmpeg are included. No administrator access is
+needed. Uninstall through Windows **Settings > Apps > Installed apps**.
 
-The exe is unsigned, so Windows shows a **"Windows protected your PC"** screen
-the first time. Click **More info -> Run anyway**. First launch takes a few
-seconds while it unpacks.
+In Spyder, click **Check for updates** beside the version number. If a newer
+stable GitHub release is available, choose **Update and restart**. The installer
+downloads in the background with progress and cancellation, is checked against
+its SHA-256 checksum and published file size, then upgrades the existing
+installation and relaunches Spyder. Your chosen download folder and saved videos
+are preserved. Checks happen only when requested; new commits alone do not
+trigger updates.
+
+You can also start a check with `Spyder.exe --check-for-updates` (or `--update`).
+Source runs and uninstalled application folders can check for releases and open
+the download page, but only installed Windows copies can install updates in-app.
+Existing portable versions must install the setup file once to get this feature.
+
+The installer is unsigned, so Windows may show a SmartScreen warning on first
+installation. Code signing is required to remove that warning reliably.
 
 ## Running from source
 
@@ -93,36 +109,43 @@ winget install Gyan.FFmpeg
 Without ffmpeg the app still starts and warns you in the log; downloads that
 need merging or MP3 conversion will fail with a clear message.
 
-## Building the .exe
+## Building the Windows installer
+
+Use 64-bit Python 3.12+ on Windows and install
+[Inno Setup 6.3 or newer](https://jrsoftware.org/isdl.php), then:
 
 ```bash
 pip install -r requirements-dev.txt
 python build.py
 ```
 
-`build.py` downloads a static ffmpeg (~30 MB zipped, once) into `vendor/`, then
-runs PyInstaller. The result is a single self-contained file:
+`build.py` fetches ffmpeg into `vendor/`, builds an application directory with
+PyInstaller, compiles the Inno Setup installer, and writes its SHA-256 file:
 
+```text
+dist/Spyder/Spyder.exe
+dist/Spyder-Setup-2.1.0.exe
+dist/Spyder-Setup-2.1.0.exe.sha256
+dist/THIRD-PARTY-NOTICES.txt
 ```
-dist\Spyder.exe
-```
 
-Roughly 80 MB, because it contains Python, PyQt6, yt-dlp and ffmpeg.
-
-Options:
+Distribute the setup file. The application directory is an intermediate build;
+its contents are installed together, so the application no longer unpacks a
+single-file bundle each time it starts.
 
 | Flag | Effect |
 | --- | --- |
 | `--clean` | delete `build/` and `dist/` first |
-| `--no-ffmpeg` | skip the ffmpeg download; produces a much smaller exe that needs ffmpeg on the user's machine |
+| `--no-ffmpeg` | exclude ffmpeg; users must install it separately |
+| `--app-only` | build just the application directory |
+| `--iscc PATH` | specify the Inno Setup compiler path |
 
-To run PyInstaller directly instead:
+The compiler is found through `--iscc`, the `ISCC` environment variable, `PATH`,
+or the usual Inno Setup installation directories. It also recognises a local
+portable compiler at `.tools/innosetup/ISCC.exe`.
 
-```bash
-pyinstaller Spyder.spec --noconfirm
-```
-
-The spec bundles `vendor/ffmpeg.exe` if it is present and warns if it is not.
+To build the application directory directly: `pyinstaller Spyder.spec --noconfirm`.
+To run update tests: `python -m unittest discover -s tests -v`.
 
 ### Notes on the build
 
@@ -145,23 +168,35 @@ The spec bundles `vendor/ffmpeg.exe` if it is present and warns if it is not.
   build generates icon sizes from `logo.png` instead.
 - Unused Qt modules (QML, Quick, WebEngine, Multimedia, …) are excluded to keep
   the exe smaller.
-- Some antivirus tools flag unsigned PyInstaller one-file exes. Code-signing is
-  the real fix; a `--onedir` build (drop `runtime_tmpdir`, use `COLLECT`) trips
-  it less often.
+- The app uses a PyInstaller directory build inside the installer. Signing the
+  setup file and app executable establishes a verified publisher.
 
 ## Releasing
 
-1. `python build.py --clean`
-2. Check `dist/` contains **Spyder.exe** and **THIRD-PARTY-NOTICES.txt**
-3. Tag and push: `git tag v1.0.0 && git push origin v1.0.0`
-4. Create the GitHub release and attach **both** files from `dist/`
+1. Bump `__version__` in `spyder/__init__.py` to a new `MAJOR.MINOR.PATCH` version.
+2. Commit and push the changes, including `.github/workflows/release.yml`.
+3. Tag that commit with the same version and push the tag, for example:
+   `git tag v2.1.0` then `git push origin v2.1.0`.
+4. The GitHub Actions workflow checks the version, runs tests, builds the Windows
+   installer, and publishes a release with the setup file, checksum and notices.
 
-Attaching the notices file matters — it is what keeps the GPL ffmpeg binary
-inside the exe properly licensed. Bump `__version__` in `spyder/__init__.py`
-when you cut a new version.
+Manual workflow runs build downloadable artifacts without publishing a release.
+For a manual release, run `python build.py` and attach the matching
+**Spyder-Setup-VERSION.exe**, **Spyder-Setup-VERSION.exe.sha256** and
+**THIRD-PARTY-NOTICES.txt** to a stable GitHub release tagged `vVERSION`.
 
-Tell people the first launch shows a SmartScreen warning (the exe is unsigned):
-**More info -> Run anyway**. Signing is the only real fix.
+The updater uses the public repository `goujandev/spyder` and GitHub's latest
+stable release endpoint. Drafts and prereleases are excluded. Release asset
+names and tag/version matching are part of the update contract: do not rename
+setup or checksum files. A missing installer or checksum produces an actionable
+error; an incomplete or corrupt download is never installed.
+
+Keep the installer `AppId` and `AppMutex` stable across releases. Setup waits
+for the updating process to exit and blocks replacement while another copy of
+Spyder is running. It shows installation failures and does not reboot Windows.
+The staged installer and `setup.log` are kept in the app's update cache for
+troubleshooting; staging directories older than seven days are cleaned on the
+next update download.
 
 ## License
 
@@ -211,6 +246,8 @@ spyder/
   theme.py           palette, the three type roles, the global stylesheet
   widgets.py         the blocky pieces Qt does not provide
   worker.py          QThread wrappers: ProbeWorker, DownloadWorker
+  updater.py         GitHub checks, verified download, installer handoff
+  update_worker.py   cancellable background update operations
   downloader.py      yt-dlp logic (Qt-free), presets, error translation
   platforms.py       which site a link is from, and what that changes
   icons.py           the line-art icon set, drawn with QPainter
@@ -222,7 +259,10 @@ logo.ico             authored Windows icon sizes
 logo.aseprite        editable pixel-art source
 assets/              generated Spyder.ico + icon.png (gitignored)
 Spyder.spec          PyInstaller spec
-build.py             fetch ffmpeg + build in one command
+build.py             fetch ffmpeg + build app and installer in one command
+installer/           Inno Setup script and installation marker
+.github/workflows/   Windows build and GitHub release publishing
+tests/               updater and UI regression tests
 vendor/              ffmpeg.exe lands here (gitignored)
 ```
 
