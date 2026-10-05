@@ -1,22 +1,26 @@
 # Spyder
 
-video downloader tool that supports 
+A video and audio downloader for YouTube, TikTok, Reddit, Pinterest and other
+sources supported by yt-dlp.
 
-video downloader tool that supports YouTube.
-
-Paste a link → it works out where the link is from and reads it → pick a
-quality → pick a folder → Download.
+Paste a link → it works out where the link is from and reads it → pick an
+output and video quality → pick a folder → Download.
 
 Licensed under [GPL-3.0](LICENSE).
 
 ## What it does
 
-- Paste a video URL and fetch the qualities that link actually offers
+- Paste a video or audio URL and fetch the outputs that link actually offers
 - Recognises the site as you paste — the name appears in the URL bar
   immediately, and the link is read without you pressing anything
 - **TikTok downloads have no watermark**, at the highest quality the post has
-- Simple quality presets: **Best available**, per-resolution (1080p, 720p, …),
-  and **Audio only (MP3)**
+- Separate **Output** and **Video quality** controls: best available video or
+  per-resolution quality, plus **MP3**, **M4A**, and **WAV** audio.
+  Choices follow source capabilities, including audio-only links; video quality
+  is disabled for audio. MP3 targets 320 kbps on conversion; M4A copies compatible
+  AAC audio or converts at 256 kbps. WAV is uncompressed and larger, but cannot
+  restore quality lost in the source. Video merges prefer MP4; the source and
+  selected streams determine the actual file type.
 - Native folder picker, remembers the last folder you used
 - Live progress bar with size, speed and ETA
 - Status/log panel showing each stage (reading link, downloading, merging with
@@ -28,8 +32,23 @@ Deliberately **not** in v1: playlists, subtitles, trimming.
 
 ## Platforms
 
-Anything [yt-dlp supports](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md)
-will download. What changes per site is how Spyder presents it.
+Spyder uses [yt-dlp extractors](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md)
+for individual video and audio links. Extractor coverage does not guarantee a
+download: availability, sign-in requirements, regional restrictions and site
+changes can prevent access.
+
+**Reddit and Pinterest video:** paste a single Reddit video post
+(`reddit.com/r/.../comments/...`) or video pin (`pinterest.com/pin/...`).
+Pinterest's supported regional domains are recognised too. `redd.it` and `pin.it`
+shortlinks are recognised and passed to yt-dlp for redirect resolution; the badge
+alone does not verify that the destination can be downloaded.
+
+Photos, galleries, boards, whole accounts and playlists are not supported.
+Collection results are rejected instead of silently selecting their first entry.
+Pinterest story pins with multiple pages are also rejected. Video choices follow
+the formats returned by the source; audio extraction is offered only when audio
+is identified. A Pinterest MP4 with unknown audio metadata can still be downloaded
+as video, with any embedded audio preserved.
 
 The moment a link lands in the URL bar its site is named there — no network
 call, it is a hostname lookup — and half a second later Spyder reads the link by
@@ -61,7 +80,7 @@ unexplained.
 
 ## Installing and updating
 
-Download **Spyder-Setup-2.1.0.exe** (or the newer setup file) from
+Download **Spyder-Setup-2.2.0.exe** (or the newer setup file) from
 [GitHub Releases](https://github.com/goujandev/spyder/releases), then run it.
 Setup installs to `%LOCALAPPDATA%\Programs\Spyder` for your Windows account,
 creates a Start Menu shortcut, and optionally creates a desktop shortcut.
@@ -107,7 +126,7 @@ winget install Gyan.FFmpeg
 ```
 
 Without ffmpeg the app still starts and warns you in the log; downloads that
-need merging or MP3 conversion will fail with a clear message.
+need merging or audio conversion will fail with a clear message.
 
 ## Building the Windows installer
 
@@ -124,8 +143,8 @@ PyInstaller, compiles the Inno Setup installer, and writes its SHA-256 file:
 
 ```text
 dist/Spyder/Spyder.exe
-dist/Spyder-Setup-2.1.0.exe
-dist/Spyder-Setup-2.1.0.exe.sha256
+dist/Spyder-Setup-2.2.0.exe
+dist/Spyder-Setup-2.2.0.exe.sha256
 dist/THIRD-PARTY-NOTICES.txt
 ```
 
@@ -176,7 +195,7 @@ To run update tests: `python -m unittest discover -s tests -v`.
 1. Bump `__version__` in `spyder/__init__.py` to a new `MAJOR.MINOR.PATCH` version.
 2. Commit and push the changes, including `.github/workflows/release.yml`.
 3. Tag that commit with the same version and push the tag, for example:
-   `git tag v2.1.0` then `git push origin v2.1.0`.
+   `git tag v2.2.0` then `git push origin v2.2.0`.
 4. The GitHub Actions workflow checks the version, runs tests, builds the Windows
    installer, and publishes a release with the setup file, checksum and notices.
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import yt_dlp
+from yt_dlp.extractor.pinterest import PinterestIE
 
 from . import platforms
 from .ffmpeg_tools import find_ffmpeg, missing_ffmpeg_message
@@ -58,6 +59,42 @@ class SpyderError(Exception):
     """An error worth showing to the user verbatim."""
 
 
+COLLECTION_MESSAGE = (
+    "Use a single video post or pin. Boards, galleries, accounts and playlists "
+    "are not supported."
+)
+
+
+class _SinglePinIE(PinterestIE):
+    @classmethod
+    def ie_key(cls):
+        return PinterestIE.ie_key()
+
+    def _extract_video(self, data, extract_formats=True):
+        # Upstream takes the first video list from a story pin. Do not present
+        # one page of a gallery as the entire requested pin.
+        pages = (data.get("story_pin_data") or {}).get("pages") or []
+        if len(pages) > 1 or any(
+            sum(bool(block.get("video")) for block in page.get("blocks", [])) > 1
+            for page in pages
+        ):
+            raise SpyderError(COLLECTION_MESSAGE)
+        return super()._extract_video(data, extract_formats)
+
+
+class SingleVideoYoutubeDL(yt_dlp.YoutubeDL):
+    """Reject collections before yt-dlp visits or downloads their entries."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.add_info_extractor(_SinglePinIE())
+
+    def process_ie_result(self, ie_result, download=True, extra_info=None):
+        if ie_result.get("_type") in ("playlist", "multi_video", "compat_list"):
+            raise SpyderError(COLLECTION_MESSAGE)
+        return super().process_ie_result(ie_result, download, extra_info)
+
+
 @dataclass(frozen=True)
 class Preset:
     """One entry in the quality dropdown."""
@@ -65,6 +102,7 @@ class Preset:
     label: str
     format_selector: str
     audio_only: bool = False
+    audio_codec: str = "mp3"
 
 
 @dataclass(frozen=True)
@@ -97,6 +135,8 @@ def _friendly_error(exc: Exception) -> str:
     lowered = text.lower()
     if "unsupported url" in lowered or "is not a valid url" in lowered:
         return "That link is not a video URL Spyder recognises. Check it and try again."
+    if any(term in lowered for term in ("no video formats", "no formats found", "no media found")):
+        return "No downloadable media was found. Photos and galleries are not supported."
     if "video unavailable" in lowered or "private video" in lowered:
         return "This video is unavailable - it may be private, deleted, or region locked."
     if "sign in" in lowered or "age-restricted" in lowered:
@@ -165,6 +205,16 @@ def _selector(platform: Platform, height: int = 0, audio_only: bool = False) -> 
     return ladder
 
 
+def _has_video(fmt: dict) -> bool:
+    codec = fmt.get("vcodec")
+    if codec is not None:
+        return codec != "none"
+    # Pinterest's direct MP4s retain unknown codecs after yt-dlp normalization.
+    # Dimensions plus a video container identify video, but do not prove audio.
+    return bool((fmt.get("height") or fmt.get("width"))
+                and fmt.get("ext") in ("mp4", "webm", "mov", "mkv"))
+
+
 def _quality_ladder(formats: list) -> dict:
     """Map each video height the source offers to the name people give it.
 
@@ -174,7 +224,7 @@ def _quality_ladder(formats: list) -> dict:
     """
     named = {}
     for fmt in formats:
-        if fmt.get("vcodec") in (None, "none"):
+        if not _has_video(fmt):
             continue
         height = fmt.get("height")
         if not height:
@@ -195,7 +245,7 @@ def _quality_ladder(formats: list) -> dict:
 
 def build_presets(info: dict, platform: Platform = platforms.GENERIC) -> list:
     """Work out which simple presets this URL can actually deliver."""
-    formats = info.get("formats") or []
+    formats = info.get("formats") or ([info] if info.get("url") else [])
     if platform.drop_watermarked:
         # Dropped here as well as in the selector, so a watermarked-only height
         # never appears in the dropdown as a rung that cannot be delivered.
@@ -207,24 +257,31 @@ def build_presets(info: dict, platform: Platform = platforms.GENERIC) -> list:
     ladder = _quality_ladder(formats)
     has_audio = any(f.get("acodec") not in (None, "none") for f in formats)
 
+    def video_selector(height=0):
+        if has_audio:
+            return _selector(platform, height=height)
+        clean = NO_WATERMARK if platform.drop_watermarked else ""
+        limit = f"[height<={height}]" if height else ""
+        return f"bv*{clean}{limit}/wv*{clean}" if height else f"bv*{clean}"
+
     presets = []
 
-    if ladder:
-        presets.append(Preset(platform.best_label, _selector(platform)))
+    if any(_has_video(f) for f in formats):
+        presets.append(Preset(platform.best_label, video_selector()))
         # A source with one quality needs no ladder underneath "best": both
         # rows would fetch the same file.
         if len(ladder) > 1:
             for height, label in list(ladder.items())[:MAX_QUALITY_ENTRIES]:
-                presets.append(Preset(label, _selector(platform, height=height)))
+                presets.append(Preset(label, video_selector(height)))
 
     if has_audio:
-        presets.append(
-            Preset(
-                "Audio only (MP3, 320 kbps)",
+        for codec in ("mp3", "m4a", "wav"):
+            presets.append(Preset(
+                f"Audio ({codec.upper()})",
                 _selector(platform, audio_only=True),
                 audio_only=True,
-            )
-        )
+                audio_codec=codec,
+            ))
 
     if not presets:
         if platform.drop_watermarked and (info.get("formats") or []):
@@ -232,7 +289,10 @@ def build_presets(info: dict, platform: Platform = platforms.GENERIC) -> list:
                 "Every copy of this video carries a watermark, so there is "
                 "nothing clean for Spyder to download."
             )
-        raise SpyderError("No downloadable video or audio was found at that link.")
+        raise SpyderError(
+            "No downloadable video or audio was found at that link. "
+            "Photos and galleries are not supported."
+        )
 
     return presets
 
@@ -258,7 +318,7 @@ def probe(url: str) -> VideoInfo:
         "skip_download": True,
     }
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with SingleVideoYoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as exc:  # noqa: BLE001 - never let the worker die unexplained
         message = _friendly_error(exc)
@@ -271,13 +331,8 @@ def probe(url: str) -> VideoInfo:
     if info is None:
         raise SpyderError("Nothing could be read from that link.")
 
-    # A playlist URL still resolves. v1 handles single videos only, so take the
-    # first entry; the UI tells the user that is what happened.
-    if info.get("_type") == "playlist":
-        entries = [e for e in (info.get("entries") or []) if e]
-        if not entries:
-            raise SpyderError("That link is a playlist with no playable videos.")
-        info = entries[0]
+    if info.get("_type") in ("playlist", "multi_video", "compat_list"):
+        raise SpyderError(COLLECTION_MESSAGE)
 
     # The extractor that answered knows what the site is, which beats a guess
     # from the hostname - shorteners and embeds only reveal themselves here.
@@ -335,7 +390,7 @@ def download(
             if name == "Merger":
                 on_log("merging video and audio")
             elif name in ("FFmpegExtractAudio", "ExtractAudio"):
-                on_log("converting to mp3")
+                on_log(f"preparing {preset.audio_codec.upper()} audio (converting if needed)")
         elif status.get("status") == "finished":
             info = status.get("info_dict") or {}
             path = info.get("filepath") or info.get("_filename")
@@ -358,18 +413,21 @@ def download(
     }
 
     if preset.audio_only:
+        if preset.audio_codec not in ("mp3", "m4a", "wav"):
+            raise SpyderError("Unsupported audio output format.")
         opts["postprocessors"] = [
             {
                 "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "320",
+                "preferredcodec": preset.audio_codec,
+                **({"preferredquality": "320"} if preset.audio_codec == "mp3" else
+                   {"preferredquality": "256"} if preset.audio_codec == "m4a" else {}),
             }
         ]
     else:
         opts["merge_output_format"] = "mp4"
 
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with SingleVideoYoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except DownloadCancelled:
         raise
@@ -381,7 +439,9 @@ def download(
 
     if isinstance(info, dict):
         requested = info.get("requested_downloads") or []
-        path = info.get("filepath") or (requested[0].get("filepath") if requested else None)
+        path = info.get("filepath") or finished["path"] or (
+            requested[0].get("filepath") if requested else None
+        )
         if path:
             finished["path"] = path
 

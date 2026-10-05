@@ -97,6 +97,9 @@ class MainWindow(QMainWindow):
         self._update_outcome: tuple | None = None
         self._close_after_update = False
         self._presets: list = []
+        self._output_presets: list = []
+        self._video_presets: list = []
+        self._probing_url = ""
         self._probed_url = ""
         self._corners_done = False
         self._auto_probe = False
@@ -194,7 +197,7 @@ class MainWindow(QMainWindow):
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.omnibox = Omnibox("Paste a video link")
+        self.omnibox = Omnibox("Paste a video or audio link")
         self.url_edit = self.omnibox.edit
         self.url_edit.returnPressed.connect(self.on_fetch)
         self.url_edit.textChanged.connect(self.on_url_changed)
@@ -206,9 +209,25 @@ class MainWindow(QMainWindow):
         row.addWidget(self.fetch_button)
         column.addLayout(row)
 
+        self.source_help = QLabel(
+            "Video links: YouTube, TikTok, Reddit, Pinterest and more.\n"
+            "Single posts or pins; no photos, galleries, boards or playlists."
+        )
+        self.source_help.setObjectName("detailText")
+        self.source_help.setWordWrap(True)
+        self.source_help.setToolTip(
+            "Examples: reddit.com/r/.../comments/... or pinterest.com/pin/...\n"
+            "redd.it and pin.it links must resolve to a supported single video.\n"
+            "Whole accounts are not supported. Availability depends on the source."
+        )
+        column.addWidget(self.source_help)
+
         # Length and uploader, once a link has been read. Hidden until then:
         # an empty row would be a label for something that does not exist.
-        self.detail_label = QLabel("")
+        self.media_title = ElidedLabel("mediaTitle")
+        self.media_title.setVisible(False)
+        column.addWidget(self.media_title)
+        self.detail_label = ElidedLabel("detailText")
         self.detail_label.setObjectName("detailText")
         self.detail_label.setVisible(False)
         column.addWidget(self.detail_label)
@@ -223,10 +242,27 @@ class MainWindow(QMainWindow):
         column.setContentsMargins(16, 16, 16, 16)
         column.setSpacing(0)
 
-        column.addWidget(section_label("Quality"))
-        column.addSpacing(7)
-        self.quality_select = BlockSelect("Fetch a link first")
-        column.addWidget(self.quality_select)
+        choices = QHBoxLayout()
+        choices.setSpacing(12)
+        output_column = QVBoxLayout()
+        output_column.setSpacing(7)
+        output_column.addWidget(section_label("Output"))
+        self.output_select = BlockSelect("Fetch a link first")
+        self.output_select.currentIndexChanged.connect(self.on_output_changed)
+        output_column.addWidget(self.output_select)
+        quality_column = QVBoxLayout()
+        quality_column.setSpacing(7)
+        quality_column.addWidget(section_label("Video quality"))
+        self.quality_select = BlockSelect("Not applicable")
+        quality_column.addWidget(self.quality_select)
+        choices.addLayout(output_column, 1)
+        choices.addLayout(quality_column, 1)
+        column.addLayout(choices)
+        column.addSpacing(8)
+        self.selection_help = QLabel("Paste a link above to discover available video and audio outputs.")
+        self.selection_help.setObjectName("detailText")
+        self.selection_help.setWordWrap(True)
+        column.addWidget(self.selection_help)
 
         column.addSpacing(16)
         column.addWidget(section_label("Save to"))
@@ -426,10 +462,15 @@ class MainWindow(QMainWindow):
 
         self.omnibox.setEnabled(not busy)
         self.fetch_button.setEnabled(not busy and bool(self.url_edit.text().strip()))
-        self.quality_select.setEnabled(not busy and bool(self._presets))
+        self.output_select.setEnabled(not busy and bool(self._output_presets))
+        selected = self._selected_preset()
+        self.quality_select.setEnabled(not busy and selected is not None and not selected.audio_only)
+        if busy:
+            self.output_select.close_popup()
+            self.quality_select.close_popup()
         self.browse_button.setEnabled(not downloading)
         self.download_button.setEnabled(
-            not busy and bool(self._presets) and bool(self.folder_edit.text())
+            not busy and selected is not None and bool(self.folder_edit.text())
         )
         updating = self._update_worker is not None
         self.cancel_button.setEnabled(downloading or updating)
@@ -462,7 +503,7 @@ class MainWindow(QMainWindow):
     def _check_ffmpeg(self) -> None:
         if find_ffmpeg():
             return
-        self.log("ffmpeg not found - merging and mp3 conversion will fail", "warn")
+        self.log("ffmpeg not found - merging and audio conversion will fail", "warn")
 
     def _check_impersonation(self, platform) -> None:
         """Warn once when a link needs something this build cannot do.
@@ -593,7 +634,12 @@ class MainWindow(QMainWindow):
         # Any edit invalidates the fetched quality list.
         if stale:
             self._presets = []
+            self._output_presets = []
+            self._video_presets = []
+            self.output_select.clear()
             self.quality_select.clear()
+            self.media_title.setVisible(False)
+            self.selection_help.setText("Paste a link above to discover available video and audio outputs.")
             self.detail_label.setVisible(False)
             self.set_head_title(IDLE_TITLE)
             self._clear_result()
@@ -643,6 +689,7 @@ class MainWindow(QMainWindow):
         self.log(url, "read")
         self._check_impersonation(platforms.detect(url))
 
+        self._probing_url = url
         self._probe_worker = ProbeWorker(url, self)
         self._probe_worker.succeeded.connect(self.on_probe_ok)
         self._probe_worker.failed.connect(self.on_probe_failed)
@@ -651,10 +698,19 @@ class MainWindow(QMainWindow):
         self._update_buttons()
 
     def on_probe_ok(self, info) -> None:
+        if self._probing_url and self._probing_url != self.url_edit.text().strip():
+            return
         self._presets = list(info.presets)
         self._probed_url = self.url_edit.text().strip()
 
-        self.quality_select.set_items([preset.label for preset in self._presets])
+        self._video_presets = [p for p in self._presets if not p.audio_only]
+        self._output_presets = ([self._video_presets[0]] if self._video_presets else []) + [
+            p for p in self._presets if p.audio_only
+        ]
+        self.output_select.set_items([
+            "Video" if not p.audio_only else p.label for p in self._output_presets
+        ])
+        self.on_output_changed()
 
         # The extractor that answered knows the site better than its
         # hostname did, so the badge is settled here rather than left a guess.
@@ -662,14 +718,16 @@ class MainWindow(QMainWindow):
 
         # The title names the tab, the way a page title does.
         self.set_head_title(info.title)
+        self.media_title.set_full_text(info.title)
+        self.media_title.setVisible(True)
         detail = info.duration
         if info.uploader:
             detail = f"{detail}  ·  {info.uploader}"
-        self.detail_label.setText(detail)
+        self.detail_label.set_full_text(detail)
         self.detail_label.setVisible(True)
 
         self.set_status("ready to download")
-        self.log(f"{len(self._presets)} qualities", "ok")
+        self.log(f"{len(self._output_presets)} output types available", "ok")
         if info.platform.drop_watermarked:
             self.log("watermarked copies skipped", "ok")
 
@@ -684,14 +742,43 @@ class MainWindow(QMainWindow):
 
     def on_probe_finished(self) -> None:
         self._probe_worker = None
+        self._probing_url = ""
+        self._update_buttons()
+
+    def _selected_preset(self):
+        index = self.output_select.current_index()
+        if not 0 <= index < len(self._output_presets):
+            return None
+        preset = self._output_presets[index]
+        if preset.audio_only:
+            return preset
+        quality = self.quality_select.current_index()
+        return self._video_presets[quality] if 0 <= quality < len(self._video_presets) else None
+
+    def on_output_changed(self, _index=0) -> None:
+        index = self.output_select.current_index()
+        if not 0 <= index < len(self._output_presets):
+            return
+        preset = self._output_presets[index]
+        if preset.audio_only:
+            self.quality_select.clear()
+            help_text = {
+                "mp3": "MP3: widely compatible; targets 320 kbps when converting.",
+                "m4a": "M4A: copies compatible AAC audio; otherwise converts at 256 kbps.",
+                "wav": "WAV: uncompressed, larger files. Cannot restore lost source quality.",
+            }
+            self.selection_help.setText(help_text[preset.audio_codec])
+        else:
+            self.quality_select.set_items([p.label for p in self._video_presets])
+            self.selection_help.setText("Choose a video quality. File type depends on the source; merges prefer MP4.")
         self._update_buttons()
 
     def on_download(self) -> None:
         if self._busy():
             return
 
-        index = self.quality_select.current_index()
-        if not self._presets or index < 0 or index >= len(self._presets):
+        preset = self._selected_preset()
+        if preset is None or self.url_edit.text().strip() != self._probed_url:
             return
 
         folder = self.folder_edit.text()
@@ -699,7 +786,6 @@ class MainWindow(QMainWindow):
             self._notice("warning", "no folder", "Choose a folder to save into first.")
             return
 
-        preset = self._presets[index]
         url = self._probed_url or self.url_edit.text().strip()
 
         self.progress_bar.setRange(0, 100)

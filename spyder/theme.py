@@ -224,6 +224,13 @@ QFrame#canvas { background-color: transparent; border: 0px; }
 QWidget#page { background-color: transparent; }
 QWidget#toolbar { background-color: transparent; }
 
+QLabel#mediaTitle {
+    color: $text;
+    font-size: 15px;
+    font-weight: 600;
+    background-color: transparent;
+}
+
 QLabel#detailText {
     background-color: transparent;
     color: $muted;
